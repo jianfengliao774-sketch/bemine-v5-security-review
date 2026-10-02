@@ -1,0 +1,13 @@
+{
+  "result": "passed",
+  "upstreamFilesVerified": 1813,
+  "localSoliditySourcesVerified": 37,
+  "snapshotCommit": "05d48032478b657ef0357467c1b67d98cdf9c76d",
+  "runtimeSourceCommit": "dea3a78b51352df45771ce6d54043b874e70383e",
+  "contractSourceCommit": "0166f545b4e45910fabc6e36dd9a53aeff3674cc",
+  "artifactDigest": "0x9523dd920e91dcab4358eceddff660d65357bfe1fe3bf6f3e7823cbc94af2502",
+  "evidenceBlock": 125317258,
+  "websitePublished": false,
+  "servicesInstalled": false,
+  "note": "Offline evidence/file consistency only; no live-chain or server requests were made."
+}
