@@ -14,6 +14,8 @@
 
 这些检查是开发验证，不是第三方安全审计结论，也不是整体功能完整覆盖证明。
 
+本次审核打包另行验证：导出的 1813 个原始文件全部逐字节匹配；artifact 中登记的 37 个本地 Solidity 源文件哈希一致；按锁文件重新安装根目录及 deploy 依赖后，重新编译的 bytecode、ABI、源码/依赖哈希和编译器设置与主网部署 artifact 完全匹配，重新计算的 artifact digest 也一致。证据为 `audit/evidence/snapshot-verification.json` 和 `audit/evidence/artifact-recompile.json`。这些步骤没有请求 RPC 或发送主网交易。
+
 ## 尚未完成
 
 - v5 网站、API、索引、signer、purchase/mining 服务在正式服务器的安装与运行验收。

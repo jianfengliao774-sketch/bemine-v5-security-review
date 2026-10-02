@@ -1,0 +1,10 @@
+{
+  "checkedAt": "2026-10-02T16:13:43.519Z",
+  "node": "v24.19.0",
+  "result": "passed",
+  "artifactDigest": "0x9523dd920e91dcab4358eceddff660d65357bfe1fe3bf6f3e7823cbc94af2502",
+  "compilerVersion": "0.8.24+commit.e11b9ed9.Emscripten.clang",
+  "artifactCheck": "Recompiled from this audit snapshot after lockfile dependency installation; bytecode, ABI, sources, dependencies and compiler settings match.",
+  "rpcRequests": 0,
+  "mainnetTransactions": 0
+}
