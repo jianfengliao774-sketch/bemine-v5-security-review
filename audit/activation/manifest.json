@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "52eaca480bf57d7c5e712c0c492419ebd66a73bf",
+  "runtimeSourceCommit": "dea3a78b51352df45771ce6d54043b874e70383e",
+  "checkedAt": "2026-10-02T23:44:49.355467+00:00",
+  "files": [
+    {
+      "path": "audit/activation/release-status.json",
+      "upstreamPath": "deploy/ops/v5/release-status.json",
+      "sha256": "529a20de9514e9e48ed6ac63dcd51f799e3e8f86cba76d4a093618d4955f402e",
+      "size": 1316
+    },
+    {
+      "path": "audit/activation/publication-receipt.json",
+      "upstreamPath": "deploy/ops/v5/publication-receipt.json",
+      "sha256": "391f5464a61eb3508380fd579fb2463e4b1195c2801c92d9c76631a5f8b19bcd",
+      "size": 1879
+    },
+    {
+      "path": "audit/activation/live-activation-proof.json",
+      "upstreamPath": "deploy/ops/v5/live-activation-proof.json",
+      "sha256": "b13d5941d4bf9d8768711332508c30072ab719608b02e7ae29c26f3f9c6b4fc5",
+      "size": 9137
+    },
+    {
+      "path": "audit/activation/public-read-verification.json",
+      "upstreamPath": "deploy/ops/v5/public-read-verification.json",
+      "sha256": "7bfe2402e60e51646710bcb2eaf3cb638c6c91711d3381feee45da542bdc0d2c",
+      "size": 6505
+    },
+    {
+      "path": "audit/activation/service-verification.json",
+      "upstreamPath": "deploy/ops/v5/service-verification.json",
+      "sha256": "be546e4f4ada8cfd17acf6ac97e5899a08424a0a83b510b8baeaf6c609a3de30",
+      "size": 1374
+    },
+    {
+      "path": "audit/activation/runtime/install-runtime.py",
+      "upstreamPath": "deploy/ops/v5/runtime/install-runtime.py",
+      "sha256": "e063f7c69d52a01b381463b29e3dcc97fd62dee688d5ba0079f33aabb9852b2b",
+      "size": 5449
+    },
+    {
+      "path": "audit/activation/runtime/verify-cutover.mjs",
+      "upstreamPath": "deploy/ops/v5/runtime/verify-cutover.mjs",
+      "sha256": "366a58e5ed9b3d846ac1abf7ad50a663f7ec1f3b8075afc9e4f908cba59441fb",
+      "size": 5335
+    },
+    {
+      "path": "audit/activation/runtime/publish-runtime.py",
+      "upstreamPath": "deploy/ops/v5/runtime/publish-runtime.py",
+      "sha256": "1c236bd33876885a69f79f89843b9d451222ec5191e4cb2412948902908987d7",
+      "size": 5611
+    },
+    {
+      "path": "audit/activation/runtime/20-read-throughput.conf",
+      "upstreamPath": "deploy/ops/v5/runtime/20-read-throughput.conf",
+      "sha256": "bcad749acae1e850cc3a984582edb5d14a5e180b6184d0ff0b255cb64f9d73dd",
+      "size": 139
+    }
+  ]
+}

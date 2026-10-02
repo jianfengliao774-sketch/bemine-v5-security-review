@@ -2,7 +2,7 @@
 
 这是提供给外部审核人的**完整代码快照**，对应新正式版 v5：智能合约、网站、部署后台、索引服务、Gas 代发与自动购机/挖矿服务均在仓库内。请先阅读本页，再按 [审核范围](audit/SCOPE.md) 和 [复现说明](audit/REPRODUCE.md) 开始。
 
-**发布状态：主网合约及 Authority 配置已完成；v5 网站和后台发布尚未完成。** 服务器 SSH 与 HTTPS 连接超时，发布包尚未上传安装。不能把本仓库或已有测试通过解释为正式站已经上线，也不能解释为已通过独立安全审计。最新已保存状态见 [release-status.json](deploy/ops/v5/release-status.json)。
+**发布状态：v5 正式站及后台已于 2026-10-03 07:39 CST 上线。** [打开正式站](https://bemine.cc.cd/bemine-v5/)；[查看上线凭证和安装脚本](audit/activation/README.md)。上线验收不代表已通过独立安全审计；本次未执行真实资金买卖测试。
 
 | 核对项 | 固定版本 / 证据 |
 | --- | --- |
@@ -13,9 +13,10 @@
 | 合约 artifact digest | `0x9523dd920e91dcab4358eceddff660d65357bfe1fe3bf6f3e7823cbc94af2502` |
 | 链上核验 | [125317258 区块的合约图核验](deploy/ops/v5/live-graph-verification.json) |
 | 部署交易 | [16 笔初始化 + 7 笔 Authority 配置](deploy/ops/v5/mainnet-deployment.json) |
-| 正式站目标地址 | `https://bemine.cc.cd/bemine-v5/`，当前待发布 |
+| 正式站 | [bemine.cc.cd/bemine-v5/](https://bemine.cc.cd/bemine-v5/)，已上线 |
+| 上线运维补充 | 原仓库 `52eaca480bf57d7c5e712c0c492419ebd66a73bf`；[证据](audit/activation/README.md) |
 
-本仓库的 Git 提交号与原仓库不同。原始 1813 个文件均逐文件保存并登记 SHA-256；仅原 README 移到 `audit/upstream/README.md`，由本页替换审核入口。合约、业务代码、依赖锁文件没有为审核另行改写。运行 `node audit/verify-snapshot.mjs` 可离线核验原始文件和主网配置之间的一致性。新增加的审核说明不属于已构建业务程序。
+本仓库的 Git 提交号与原仓库不同。原始 1813 个文件均逐文件保存并登记 SHA-256；仅原 README 移到 `audit/upstream/README.md`，由本页替换审核入口。合约、业务代码、依赖锁文件没有为审核另行改写。运行 `node audit/verify-snapshot.mjs` 可离线核验原始文件和主网配置之间的一致性。新增审核说明和 `audit/activation/` 是上线补充，不改变原始业务构建；补充文件另有 SHA-256 清单。原始快照内的待发布状态保留为历史证据，以本次上线补充为当前发布状态。
 
 ## 从这里开始
 
