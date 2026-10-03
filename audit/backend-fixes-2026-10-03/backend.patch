@@ -1,0 +1,452 @@
+diff --git a/deploy/server/firsto-ask-publisher-store.mjs b/deploy/server/firsto-ask-publisher-store.mjs
+index 60eceda..a6a9e55 100644
+--- a/deploy/server/firsto-ask-publisher-store.mjs
++++ b/deploy/server/firsto-ask-publisher-store.mjs
+@@ -3,7 +3,12 @@ import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lst
+ import { spawnSync } from 'node:child_process';
+ import { dirname, isAbsolute } from 'node:path';
+ import { DatabaseSync } from 'node:sqlite';
+-import { getAddress } from 'ethers';
++import { getAddress, Interface } from 'ethers';
++import { productKey } from './journal-store.mjs';
++
++const saleIntentAbi = new Interface([
++  'function completeFirstoSale(uint256 expectedProposalId,uint256 expectedSalePrice,uint16 expectedFeeBps,uint256 expectedFeeEpoch) payable',
++]);
+ 
+ const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
+ const same = (a, b) => getAddress(a) === getAddress(b);
+@@ -71,7 +76,7 @@ export function writeFirstoAskJournal(path, value) {
+   }
+ }
+ 
+-/** Active authenticated intents are conservative reservations, including unknown wallet hashes. */
++/** Only signing-authorized or broadcast intents reserve a listing; unknown sends stay reserved. */
+ export function createPendingFirstoSaleIntentReader(path, { factory }) {
+   privateFile(path, { mustExist: true });
+   const db = new DatabaseSync(path, { readOnly: true });
+@@ -81,9 +86,9 @@ export function createPendingFirstoSaleIntentReader(path, { factory }) {
+   catch (error) { db.close(); throw error; }
+   let closed = false;
+   return {
+-    hasPendingSaleIntent(pool) {
++    hasPendingSaleIntent(pool, ask) {
+       if (closed) throw new Error('Native ask buyer-intent reader is closed.');
+-      return hasPendingSaleIntent(pool);
++      return hasPendingSaleIntent(pool, ask);
+     },
+     close() { if (!closed) { closed = true; db.close(); } },
+   };
+@@ -91,12 +96,31 @@ export function createPendingFirstoSaleIntentReader(path, { factory }) {
+ 
+ /** Reuse the API-owned open database; the signer never opens or receives it. */
+ export function pendingFirstoSaleIntentFromDatabase(db, { factory }) {
+-  const query = db.prepare(`SELECT 1 FROM market WHERE record IS NOT NULL
+-      AND lower(json_extract(record,'$.factory'))=? AND lower(json_extract(record,'$.target'))=?
+-      AND json_extract(record,'$.chainId')=56 AND json_extract(record,'$.targetType')='pool'
+-      AND json_extract(record,'$.action.kind')='completeFirstoSale' LIMIT 1`);
++  const query = db.prepare(`SELECT m.record,s.intent_key FROM market m
++      LEFT JOIN market_signing s ON s.account=m.account WHERE m.record IS NOT NULL
++      AND lower(json_extract(m.record,'$.factory'))=? AND lower(json_extract(m.record,'$.target'))=?
++      AND json_extract(m.record,'$.chainId')=56 AND json_extract(m.record,'$.targetType')='pool'
++      AND json_extract(m.record,'$.action.kind')='completeFirstoSale'`);
+   const bound = getAddress(factory).toLowerCase();
+-  return pool => Boolean(query.get(bound, getAddress(pool).toLowerCase()));
++  return (pool, ask) => query.all(bound, getAddress(pool).toLowerCase()).some(row => {
++    const record = JSON.parse(row.record);
++    // A PUT preparation alone grants no signing permission. An old signing row
++    // for this account must not reserve a different, newly prepared intent.
++    const sent = Boolean(record.hash || record.recoveryHashes?.length || record.cancellationRequests?.length);
++    let armed = false;
++    try { armed = row.intent_key === productKey(record); }
++    catch { return sent || Boolean(row.intent_key); }
++    if (!sent && !armed) return false;
++    if (!ask) return true;
++    try {
++      const decoded = saleIntentAbi.parseTransaction({ data: record.data });
++      // FirstoSale._ask uses listedProposalId as its native ask nonce. Older
++      // calldata cannot buy a new proposal. Preserve the journal for recovery;
++      // never expire an unknown send merely because time has passed.
++      if (!decoded || decoded.name !== 'completeFirstoSale' || BigInt(ask.nonce) <= 0n) return true;
++      return decoded.args.expectedProposalId === BigInt(ask.nonce);
++    } catch { return true; }
++  });
+ }
+ 
+ export const firstoAskMessages = {
+diff --git a/deploy/server/firsto-ask-publisher-store.test.mjs b/deploy/server/firsto-ask-publisher-store.test.mjs
+index dcb559c..b137b92 100644
+--- a/deploy/server/firsto-ask-publisher-store.test.mjs
++++ b/deploy/server/firsto-ask-publisher-store.test.mjs
+@@ -4,11 +4,16 @@ import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { DatabaseSync } from 'node:sqlite';
++import { Interface } from 'ethers';
+ import { JournalStore } from './journal-store.mjs';
+ import { readFirstoAskJournal, writeFirstoAskJournal, createPendingFirstoSaleIntentReader,
+   writeFirstoAskStatus, readFirstoAskPublisherStatus, acquireFirstoAskJournalLock } from './firsto-ask-publisher-store.mjs';
+ 
+ const address = n => `0x${n.toString(16).padStart(40, '0')}`, factory = address(1), exchange = address(2), pool = address(3);
++const saleAbi = new Interface(['function completeFirstoSale(uint256,uint256,uint16,uint256) payable']);
++const intentFor = (proposal = 1) => ({ version: 2, chainId: 56, factory, target: pool, targetType: 'pool',
++  action: { kind: 'completeFirstoSale' }, nonce: 7, value: '101', submittedAt: 1000,
++  data: saleAbi.encodeFunctionData('completeFirstoSale', [proposal, 100, 100, 1]) });
+ const temporary = t => { const dir = mkdtempSync(join(tmpdir(), 'native-ask-state-')); chmodSync(dir, 0o700);
+   t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; };
+ 
+@@ -31,22 +36,33 @@ test('API-owned publication lock excludes another worker and reuses the same pri
+     finally { next(); }
+   });
+ 
+-test('read-only buyer reservation finds exact pending pool intents including absent transaction hashes', t => {
+-  const path = join(temporary(t), 'journal.sqlite'), db = new DatabaseSync(path);
+-  db.exec('CREATE TABLE market(account TEXT PRIMARY KEY, record TEXT)'); chmodSync(path, 0o600);
+-  const put = (owner, value) => db.prepare('INSERT OR REPLACE INTO market VALUES(?,?)').run(owner, JSON.stringify(value));
+-  const intent = { version: 2, chainId: 56, factory, target: pool, targetType: 'pool', action: { kind: 'completeFirstoSale' } };
++test('prepared records do not reserve asks; armed unknown sends survive restart and bind to the current proposal', t => {
++  const path = join(temporary(t), 'journal.sqlite'), owner = address(7), intent = intentFor();
++  let store = new JournalStore(path);
+   const reader = createPendingFirstoSaleIntentReader(path, { factory });
+   try {
+-  assert.equal(reader.hasPendingSaleIntent(pool), false);
+-  put(address(7), intent); assert.equal(reader.hasPendingSaleIntent(pool), true);
+-  assert.equal(reader.hasPendingSaleIntent(address(8)), false);
+-  put(address(7), { ...intent, factory: address(8) }); assert.equal(reader.hasPendingSaleIntent(pool), false);
+-  put(address(7), { ...intent, action: { kind: 'claim' } }); assert.equal(reader.hasPendingSaleIntent(pool), false);
+-  put(address(7), { ...intent, hash: `0x${'ab'.repeat(32)}` }); assert.equal(reader.hasPendingSaleIntent(pool), true);
+-  db.prepare('UPDATE market SET record=NULL').run(); assert.equal(reader.hasPendingSaleIntent(pool), false);
+-  assert.equal(db.prepare('SELECT count(*) AS n FROM market').get().n, 1, 'the reader never clears or rewrites user journals');
+-  } finally { reader.close(); db.close(); }
++    store.putMarket(owner, intent, 0);
++    assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '1' }), false);
++    store.close(); store = new JournalStore(path);
++    assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '1' }), false, 'restart cannot turn preparation into signing');
++    store.armMarket(owner, 1);
++    assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '1' }), true, 'unknown hash stays protected');
++    store.close(); store = new JournalStore(path);
++    assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '1' }), true);
++    assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '2' }), false, 'old proposal cannot buy a new listing');
++    assert.equal(reader.hasPendingSaleIntent(address(8), { nonce: '1' }), false);
++    assert.deepEqual(store.market(owner).record, intent, 'publication never changes recovery state');
++    store.deleteMarket(owner, 2, { transactionHash: `0x${'ab'.repeat(32)}`, status: 'confirmed', finalized: true });
++    store.putMarket(owner, { ...intentFor(2), nonce: 8 }, 3);
++    assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '2' }), false, 'old signing key does not arm a new preparation');
++    for (const patch of [{ hash: `0x${'cd'.repeat(32)}` }, { recoveryHashes: [`0x${'cd'.repeat(32)}`] },
++      { cancellationRequests: [{ nonce: 8 }] }]) {
++      store.db.prepare('UPDATE market SET record=?').run(JSON.stringify({ ...intentFor(2), nonce: 8, ...patch }));
++      assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '2' }), true);
++    }
++    store.db.prepare('UPDATE market SET record=?').run(JSON.stringify({ ...intentFor(), data: '0x1234', hash: `0x${'cd'.repeat(32)}` }));
++    assert.equal(reader.hasPendingSaleIntent(pool, { nonce: '2' }), true, 'undecodable broadcast remains conservative');
++  } finally { reader.close(); store.close(); }
+ });
+ 
+ test('public publication status is bounded, identity-specific and does not turn stale data into freshness', t => {
+@@ -64,10 +80,10 @@ test('public publication status is bounded, identity-specific and does not turn
+ 
+ test('the real finalized journal deletion releases the buyer gate while its immutable result stays archived', t => {
+   const path = join(temporary(t), 'journal.sqlite'), db = new DatabaseSync(path);
+-  db.exec('CREATE TABLE market(account TEXT PRIMARY KEY,revision INTEGER,record TEXT); CREATE TABLE market_results(account TEXT,hash TEXT,result TEXT,PRIMARY KEY(account,hash))');
++  db.exec('CREATE TABLE market(account TEXT PRIMARY KEY,revision INTEGER,record TEXT); CREATE TABLE market_signing(account TEXT PRIMARY KEY,intent_key TEXT); CREATE TABLE market_results(account TEXT,hash TEXT,result TEXT,PRIMARY KEY(account,hash))');
+   chmodSync(path, 0o600);
+   const owner = address(7), record = { version: 2, chainId: 56, factory, target: pool, targetType: 'pool',
+-    action: { kind: 'completeFirstoSale' }, status: 'complete' };
++    action: { kind: 'completeFirstoSale' }, hash: `0x${'ab'.repeat(32)}`, status: 'complete' };
+   db.prepare('INSERT INTO market VALUES(?,?,?)').run(owner, 1, JSON.stringify(record));
+   const store = Object.assign(Object.create(JournalStore.prototype), { db });
+   const reader = createPendingFirstoSaleIntentReader(path, { factory });
+diff --git a/deploy/server/firsto-ask-publisher.mjs b/deploy/server/firsto-ask-publisher.mjs
+index b4ef6b0..bb1fff9 100644
+--- a/deploy/server/firsto-ask-publisher.mjs
++++ b/deploy/server/firsto-ask-publisher.mjs
+@@ -137,7 +137,6 @@ export function createFirstoAskPublisher({ config, provider, factory, verifyDepl
+       for (const pool of selected) {
+         if (stopped) return;
+         try {
+-          if (await hasPendingSaleIntent(pool)) { row(pool, 'buyer-pending'); continue; }
+           let native;
+           try { native = await readNative(provider, pool); }
+           catch { row(pool, 'read-unavailable'); continue; }
+@@ -151,6 +150,7 @@ export function createFirstoAskPublisher({ config, provider, factory, verifyDepl
+             row(pool, native.nativeVersion !== 1 ? 'upgrade-required' : expired ? 'expired' : 'inactive'); continue;
+           }
+           const ask = canonical(pool, native), key = pool.toLowerCase();
++          if (await hasPendingSaleIntent(pool, ask.ask)) { row(pool, 'buyer-pending'); continue; }
+           let saved = journal.pools[key];
+           if (saved && saved.askHash.toLowerCase() !== ask.askHash.toLowerCase()) {
+             // A different hash on the same nonce must be explicitly resolved;
+@@ -179,12 +179,12 @@ export function createFirstoAskPublisher({ config, provider, factory, verifyDepl
+           }
+           // GET can span a sale or wallet-send. Re-read the one authorized
+           // tuple and the local buyer reservation immediately before the POST.
+-          if (stopped || await hasPendingSaleIntent(pool)) { row(pool, 'buyer-pending'); continue; }
++          if (stopped || await hasPendingSaleIntent(pool, ask.ask)) { row(pool, 'buyer-pending'); continue; }
+           const current = canonical(pool, await readNative(provider, pool));
+           if (!current || current.askHash.toLowerCase() !== ask.askHash.toLowerCase()) { row(pool, 'authorization-changed'); continue; }
+           // The RPC read may itself span a local wallet-send. This final
+           // synchronous database observation precedes our durable HTTP intent.
+-          if (stopped || await hasPendingSaleIntent(pool)) { row(pool, 'buyer-pending'); continue; }
++          if (stopped || await hasPendingSaleIntent(pool, ask.ask)) { row(pool, 'buyer-pending'); continue; }
+           const attempted = { pool, askHash: ask.askHash, nonce: ask.ask.nonce, envelope: ask.payload,
+             phase: 'submitting', attemptedAt: new Date(now()).toISOString() };
+           journal.pools[key] = attempted;
+diff --git a/deploy/server/firsto-ask-publisher.test.mjs b/deploy/server/firsto-ask-publisher.test.mjs
+index cf2731e..4a32162 100644
+--- a/deploy/server/firsto-ask-publisher.test.mjs
++++ b/deploy/server/firsto-ask-publisher.test.mjs
+@@ -82,7 +82,7 @@ test('expired native listings are marked expired without posting or pretending t
+ 
+ test('an existing unresolved site purchase blocks lookup and publication, including unknown hashes', async () => {
+   const f = fixture({ pending: () => true }); await f.publisher.tick();
+-  assert.equal(f.row.status, 'buyer-pending'); assert.equal(f.nativeReads, 0); assert.equal(f.calls.length, 0);
++  assert.equal(f.row.status, 'buyer-pending'); assert.equal(f.nativeReads, 1); assert.equal(f.calls.length, 0);
+   assert.deepEqual(f.journal.pools, {}); await f.publisher.close();
+ });
+ 
+@@ -236,9 +236,9 @@ test('configuration defaults off and only permits the fixed official API and iso
+ 
+ test('API-owned publisher uses its existing private DB and never opens signer state or needs signer credentials', async () => {
+   const f = fixture(), db = new DatabaseSync(':memory:');
+-  db.exec('CREATE TABLE market(account TEXT PRIMARY KEY,record TEXT)');
++  db.exec('CREATE TABLE market(account TEXT PRIMARY KEY,record TEXT); CREATE TABLE market_signing(account TEXT PRIMARY KEY,intent_key TEXT)');
+   db.prepare('INSERT INTO market VALUES(?,?)').run(address(9), JSON.stringify({ factory, target: pool, chainId: 56,
+-    targetType: 'pool', action: { kind: 'completeFirstoSale' }, hash: null }));
++    targetType: 'pool', action: { kind: 'completeFirstoSale' }, hash: `0x${'ab'.repeat(32)}` }));
+   const worker = createFirstoAskApiWorker({ config: f.config, provider: f.provider, factory, store: { db },
+     verifyDeployment: async () => ({ nativeSaleUpgrade: { version: 1 } }), dependencies: f.dependencies,
+     publishStatus: (_path, value) => f.statuses.push(structuredClone(value)) });
+@@ -252,3 +252,21 @@ test('API-owned publisher uses its existing private DB and never opens signer st
+   assert.throws(() => createFirstoAskApiWorker({ config: f.config, provider: f.provider, factory,
+     verifyDeployment: async () => ({}), store: {} }), /API-owned/);
+ });
++
++test('API-owned publication is not blocked by a hashless preparation without signing permission', async () => {
++  const f = fixture(), db = new DatabaseSync(':memory:');
++  db.exec('CREATE TABLE market(account TEXT PRIMARY KEY,record TEXT); CREATE TABLE market_signing(account TEXT PRIMARY KEY,intent_key TEXT)');
++  const iface = new Interface(['function completeFirstoSale(uint256,uint256,uint16,uint256) payable']);
++  const record = { version: 2, factory, target: pool, chainId: 56, nonce: 3, value: '100', submittedAt: 1000,
++    data: iface.encodeFunctionData('completeFirstoSale', [1, f.native.ask.price, 100, 1]),
++    targetType: 'pool', action: { kind: 'completeFirstoSale' }, hash: null };
++  db.prepare('INSERT INTO market VALUES(?,?)').run(address(9), JSON.stringify(record));
++  const worker = createFirstoAskApiWorker({ config: f.config, provider: f.provider, factory, store: { db },
++    verifyDeployment: async () => ({ nativeSaleUpgrade: { version: 1 } }), dependencies: f.dependencies,
++    publishStatus: (_path, value) => f.statuses.push(structuredClone(value)) });
++  try {
++    await worker.tick(); assert.equal(posts(f).length, 1);
++    assert.equal(worker.snapshot().pools[pool].status, 'publication-accepted');
++    assert.equal(db.prepare('SELECT record FROM market').get().record, JSON.stringify(record));
++  } finally { await worker.close(); await f.publisher.close(); db.close(); }
++});
+diff --git a/deploy/server/fresh-product-http.test.mjs b/deploy/server/fresh-product-http.test.mjs
+index 8c8d0bb..3653d4b 100644
+--- a/deploy/server/fresh-product-http.test.mjs
++++ b/deploy/server/fresh-product-http.test.mjs
+@@ -38,3 +38,37 @@ test('new product HTTP instance blocks deployment and activation before any wall
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/journal/${path}`);assert.equal(response.status,403);assert.match((await response.json()).error,/public product/);
+  }}finally{await new Promise(resolve=>server.close(resolve));await service.close();rmSync(dir,{recursive:true});}
+ });
++
++test('fresh display traffic reuses one readiness check; explicit operational permission still checks again',async()=>{
++ const dir=mkdtempSync(join(tmpdir(),'fresh-display-cache-'));chmodSync(dir,0o700);const f=deployment();
++ const activationPath=join(dir,'activation.json');writeFileSync(activationPath,JSON.stringify(f.activation));
++ const manifest=createFreshIndexManifest(f.manifest), stamp=2_000_000_000_000;
++ const block={number:210,hash:h(210),timestamp:stamp/1000};let checks=0,reads=0;
++ const source={chainId:56,complete:true,factory:manifest.factory,market:manifest.shareMarket,
++  portfolioFactory:manifest.portfolioFactory,portfolioMarket:manifest.portfolioMarket,
++  startBlock:115,indexedThrough:210,observedSafeHead:210,indexedBlockHash:block.hash,indexedTimestamp:stamp/1000};
++ const index=createServer((_req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({source}));});
++ await new Promise(r=>index.listen(0,'127.0.0.1',r));
++ const graph={factory:manifest.factory,blockNumber:block.number,artifactDigest:f.record.artifactDigest,
++  addresses:f.record.addresses,codehash:Object.fromEntries(Object.entries(f.record.verification.code).map(([k,v])=>[k,v.codehash])),
++  freshFactoryVerified:true,freshAuthority:{...manifest.freshAuthority,activationBlock:206,activationHash:h(306)}};
++ const service=createJournalService({dbPath:join(dir,'journal.sqlite'),origin:'https://bemine.example',now:()=>stamp,
++  currentArtifactDigest:()=>f.record.artifactDigest,allowedProductFactories:[manifest.factory,manifest.portfolioFactory],
++  productDeploymentRecord:f.record,productArtifactBundle:f.bundle,freshActivationEvidencePath:activationPath,
++  expectedGasWallet:f.expectedGasWallet,
++  provider:{send:async()=>{reads++;return '0x38';},getBlock:async tag=>{reads++;return tag===206?{number:206,hash:h(306),timestamp:stamp/1000-1}:block;}},
++  productGraphVerifier:async()=>graph,
++  freshProduct:{manifest,sourceHead:'a'.repeat(40),indexUrl:`http://127.0.0.1:${index.address().port}/health`},
++  freshProductReadinessReader:async()=>{checks++;throw Error('worker unavailable');}});
++ const server=createServer((req,res)=>service.handle(req,res));await new Promise(r=>server.listen(0,'127.0.0.1',r));
++ try {
++  const url=`http://127.0.0.1:${server.address().port}/api/journal/product-graph`;
++  const first=await (await fetch(url)).json();assert.equal(first.stage,'fresh-active');assert.equal(first.operationalReady,false);
++  assert.equal(checks,1);const before=reads;
++  const visitors=await Promise.all(Array.from({length:12},async()=>{const r=await fetch(url);assert.equal(r.status,200);return r.json();}));
++  assert(visitors.every(v=>v.readMode==='current' && !v.operationalReady));
++  assert.equal(checks,1);assert.equal(reads,before,'cached visitors perform no upstream RPC');
++  await assert.rejects(service.verifyFreshOperationalReadiness(),/worker unavailable/);
++  assert.equal(checks,2,'cached display cannot grant fresh operational permission');
++ }finally{await new Promise(r=>server.close(r));await service.close();await new Promise(r=>index.close(r));rmSync(dir,{recursive:true});}
++});
+diff --git a/deploy/server/journal-api.mjs b/deploy/server/journal-api.mjs
+index 669b35a..cf72575 100644
+--- a/deploy/server/journal-api.mjs
++++ b/deploy/server/journal-api.mjs
+@@ -33,7 +33,10 @@ const OFFICIAL_CACHE_MS = 5_000;
+ const OFFICIAL_GRAPH_CACHE_MS = 5_000;
+ const SIGNING_GRAPH_CACHE_MS = 5_000;
+ const PRODUCT_GRAPH_SNAPSHOT_MS = 45_000;
+-const PRODUCT_GRAPH_STALE_MS = 2 * 60_000;
++// Historical display only; this never grants transaction permission. A short
++// RPC outage or an idle site must not erase the last verified deployment.
++const PRODUCT_GRAPH_STALE_MS = 60 * 60_000;
++const PRODUCT_GRAPH_ACTIVE_MS = 2 * 60_000;
+ // Keep a fresh display proof warm with margin before the 45-second current
+ // window ends, without redoing the full graph every 15 seconds while idle.
+ const PRODUCT_GRAPH_REFRESH_MS = 40_000;
+@@ -1566,8 +1569,9 @@ export function createJournalService({ dbPath, origin, rpcUrl, secureCookies = f
+         userExitReady:stage==='fresh-active' && Boolean(freshProductVerifier),
+         manifest};
+       if (closed) fail(503, 'Journal is unavailable.');
+-      lastVerifiedProductGraphSnapshot={savedAt:now(),body,graph};
+-      return body;
++      const readyBody=await operationalBody(body,graph);
++      lastVerifiedProductGraphSnapshot={savedAt:now(),body:readyBody,graph};
++      return readyBody;
+     } catch (error) {
+       // A transport failure is not evidence that a previously verified graph
+       // changed. Keep it for display only, without extending its original age.
+@@ -1595,12 +1599,12 @@ export function createJournalService({ dbPath, origin, rpcUrl, secureCookies = f
+   }
+ 
+   // Keep a recently visited display warm. After a quiet period, the next
+-  // visitor must get a new proof before receiving a current graph.
++  // visitor receives a historical display snapshot while a new proof runs.
+   const productGraphTimer=productMode && trustedProduct && officialProvider
+     ? setInterval(()=>{
+       const time=now();
+       if(!closed && lastProductGraphReadAt!==null && time>=lastProductGraphReadAt
+-        && time-lastProductGraphReadAt<PRODUCT_GRAPH_STALE_MS
++        && time-lastProductGraphReadAt<PRODUCT_GRAPH_ACTIVE_MS
+         && (lastProductGraphRefreshAttemptAt===null
+           || time-lastProductGraphRefreshAttemptAt>=productGraphRefreshMs))
+         startProductGraphRefresh().catch(()=>{});
+@@ -1624,13 +1628,13 @@ export function createJournalService({ dbPath, origin, rpcUrl, secureCookies = f
+   const stopNativeAskTracking = nativeAskPublisher
+     ? trackFirstoAsks(nativeAskPublisher, { intervalMs: firstoAskPublisher.intervalMs }) : async () => {};
+ 
+-  async function operationalBody(body) {
++  async function operationalBody(body,graph) {
+     if (!freshProductVerifier || body.stage !== 'fresh-active') return body;
+     try {
+       const verifier=typeof freshProductVerifier.prepareIndex==='function'
+         ? await freshProductVerifier.prepareIndex() : freshProductVerifier;
+       const block=await officialProvider.getBlock('latest');
+-      await verifier(officialProvider,lastVerifiedProductGraphSnapshot.graph,block);
++      await verifier(officialProvider,graph,block);
+       return {...body,operationalReady:true};
+     } catch { return {...body,operationalReady:false}; }
+   }
+@@ -1671,7 +1675,7 @@ export function createJournalService({ dbPath, origin, rpcUrl, secureCookies = f
+         const cached=lastVerifiedProductGraphSnapshot;
+         const snapshotAgeMs=cached ? now()-cached.savedAt : Infinity;
+         if (snapshotAgeMs>=0 && snapshotAgeMs<PRODUCT_GRAPH_SNAPSHOT_MS)
+-          return send(200,{...await operationalBody(cached.body),snapshotAgeMs,readMode:'current',stale:false});
++          return send(200,{...cached.body,snapshotAgeMs,readMode:'current',stale:false});
+         if (cached && snapshotAgeMs>=PRODUCT_GRAPH_SNAPSHOT_MS
+           && snapshotAgeMs<PRODUCT_GRAPH_STALE_MS) {
+           // The response remains display-only even if a prior transient RPC
+@@ -1687,7 +1691,7 @@ export function createJournalService({ dbPath, origin, rpcUrl, secureCookies = f
+         // Bound only requests that must wait for a new chain proof.
+         if (!allowPublicGraph(req)) fail(429, 'Too many product-graph reads; retry shortly.');
+         const body=await startProductGraphRefresh();
+-        return send(200,{...await operationalBody(body),snapshotAgeMs:0,readMode:'current',stale:false});
++        return send(200,{...body,snapshotAgeMs:0,readMode:'current',stale:false});
+       }
+       if (method === 'GET' && ['/api/journal/official-candidates','/api/journal/budget-candidates'].includes(path)){
+         const response=await discoveryResponse(req,url,path.endsWith('/budget-candidates')?'budget':'official');
+diff --git a/deploy/server/journal-store.mjs b/deploy/server/journal-store.mjs
+index 88691a9..ae79f17 100644
+--- a/deploy/server/journal-store.mjs
++++ b/deploy/server/journal-store.mjs
+@@ -12,7 +12,7 @@ const canonical = value => JSON.stringify(value, function (_key, item) {
+     ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item;
+ });
+ const same = (a, b) => canonical(a) === canonical(b);
+-const productKey=record=>canonical([record.nonce,record.factory.toLowerCase(),record.target.toLowerCase(),record.data.toLowerCase(),record.value,record.submittedAt]);
++export const productKey=record=>canonical([record.nonce,record.factory.toLowerCase(),record.target.toLowerCase(),record.data.toLowerCase(),record.value,record.submittedAt]);
+ 
+ /** Private, durable operation journal. A revision survives archival/deletion. */
+ export class JournalStore {
+diff --git a/deploy/server/product-graph-integrated.test.mjs b/deploy/server/product-graph-integrated.test.mjs
+index e0544f2..f6abd3e 100644
+--- a/deploy/server/product-graph-integrated.test.mjs
++++ b/deploy/server/product-graph-integrated.test.mjs
+@@ -253,11 +253,11 @@ test('expired verified graph returns immediately as display-only while one new p
+     assert.equal(fresh.readMode,'current');
+     assert.equal(fresh.stale,false);
+     assert.equal(fresh.verifiedBlockHash,next.hash);
+-    clock+=120_000;
++    clock+=60*60_000;
+     const aged=await (await fetch(url,{headers:{'x-real-ip':'127.0.0.2'}})).json();
+     assert.equal(aged.readMode,'current','a snapshot beyond the stale bound must wait for a new proof');
+     assert.equal(verifications,3);
+-    rejectGraph=true;clock+=120_000;
++    rejectGraph=true;clock+=60*60_000;
+     const missHeaders={'x-real-ip':'198.51.100.42'};
+     for(let index=0;index<4;index++)
+       assert.equal((await fetch(url,{headers:missHeaders})).status,503,
+@@ -272,7 +272,7 @@ test('expired verified graph returns immediately as display-only while one new p
+   }
+ });
+ 
+-test('recent product visitor gets a warm graph, while a first visitor after idle waits for a new proof', async () => {
++test('recent product visitor gets a warm graph; an idle visitor gets historical data while refresh resumes', async () => {
+   const directory=await mkdtemp(join(tmpdir(),'product-graph-timer-api-'));
+   const initial=genesisRecord.steps.find(step=>step.id==='initialize');
+   const first={number:initial.receipt.blockNumber+100,hash:salt('6'),timestamp:1_700_000_100};
+@@ -323,10 +323,14 @@ test('recent product visitor gets a warm graph, while a first visitor after idle
+     await new Promise(resolve=>setTimeout(resolve,220));
+     assert.equal(verifications,2,'idle traffic must not trigger another full graph proof');
+     const firstAfterIdle=await(await fetch(url)).json();
+-    assert.equal(firstAfterIdle.readMode,'current');
+-    assert.equal(firstAfterIdle.stale,false);
+-    assert.equal(firstAfterIdle.verifiedBlockHash,afterIdle.hash);
+-    assert.equal(verifications,3,'the first visitor after idle waits for a new verified graph');
++    assert.equal(firstAfterIdle.readMode,'verified_snapshot');
++    assert.equal(firstAfterIdle.stale,true);
++    assert.equal(firstAfterIdle.verifiedBlockHash,next.hash);
++    assert.equal(firstAfterIdle.transactionReady,false);
++    await new Promise(resolve=>setImmediate(resolve));
++    const refreshed=await(await fetch(url)).json();
++    assert.equal(refreshed.verifiedBlockHash,afterIdle.hash);
++    assert.equal(verifications,3,'idle visitor resumes one background proof');
+   }finally{
+     await new Promise(resolve=>server.close(resolve));
+     await service.close();
+@@ -418,7 +422,7 @@ test('a bounded public budget proof cannot consume the site graph refresh slot',
+   }
+ });
+ 
+-test('a transient RPC outage retains only the original two-minute display snapshot', async () => {
++test('a transient RPC outage retains the original display timestamp within a one-hour bound', async () => {
+   const directory=await mkdtemp(join(tmpdir(),'product-graph-transient-api-'));
+   const initial=genesisRecord.steps.find(step=>step.id==='initialize');
+   const block={number:initial.receipt.blockNumber+100,hash:salt('6'),timestamp:1_700_000_100};
+@@ -472,7 +476,12 @@ test('a transient RPC outage retains only the original two-minute display snapsh
+     assert.ok(staleReads.every(response=>response.status===200));
+     assert.equal(offlineReads,1,'stale display traffic cannot repeatedly start a fast-failing proof');
+     clock=1_000_000+2*60_000;
+-    assert.equal((await fetch(url)).status,503,'a network outage cannot extend the two-minute bound');
++    const historical=await (await fetch(url)).json();
++    assert.equal(historical.readMode,'verified_snapshot');
++    assert.equal(historical.operationalReady,false);
++    assert.equal(historical.snapshotAgeMs,2*60_000);
++    clock=1_000_000+60*60_000;
++    assert.equal((await fetch(url)).status,503,'a network outage cannot extend the one-hour display bound');
+   }finally{
+     await new Promise(resolve=>server.close(resolve));
+     await service.close();
+@@ -517,8 +526,8 @@ test('a temporarily missing reviewed anchor keeps only the bounded display snaps
+     assert.equal(retained.readMode,'verified_snapshot');
+     assert.equal(retained.transactionReady,false);
+     assert.equal(retained.snapshotAgeMs,45_000);
+-    clock=1_000_000+2*60_000;
+-    assert.equal((await fetch(url)).status,503,'missing RPC data cannot extend the two-minute bound');
++    clock=1_000_000+60*60_000;
++    assert.equal((await fetch(url)).status,503,'missing RPC data cannot extend the display bound');
+   }finally{
+     await new Promise(resolve=>server.close(resolve));
+     await service.close();

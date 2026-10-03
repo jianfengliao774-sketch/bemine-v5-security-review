@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "apiSourceHead": "788cd0d705ba053615b5f5a8c319a6eeb752a1a7",
+  "baseReviewSourceHead": "05d48032478b657ef0357467c1b67d98cdf9c76d",
+  "files": {
+    "README.md": {
+      "sha256": "0b6b997582786c0707a994f7e8dca279d1a9cc11d1f4dda4b19a47edbe9b54c5",
+      "bytes": 1728
+    },
+    "REVIEW.md": {
+      "sha256": "1bbc244153492e0a109e46d1e1a47c83f600c90276be655b38cd6b2190c5a388",
+      "bytes": 6301
+    },
+    "backend.patch": {
+      "sha256": "3e10fbf424c7519d8af36793c432ee5b6f04aca29bf94e3e92a412dfb9f36fa8",
+      "bytes": 31209
+    },
+    "evidence/README.md": {
+      "sha256": "b92fb2eea020cab58ff21ec04ff8222ea7a229730361cd31ca289452e322fb96",
+      "bytes": 2479
+    },
+    "evidence/backend-tests.tap": {
+      "sha256": "7aae063c6dc0d8ba4714da9dbd3ed5477e449058d8fc3089e3fa51211ba8c8da",
+      "bytes": 7473
+    },
+    "evidence/display-tests.tap": {
+      "sha256": "d03b809cfccd55d6d798a93fda640c3f1d8b95244d28b168d6805ddabee251d7",
+      "bytes": 1063
+    },
+    "evidence/http-verification.json": {
+      "sha256": "2512c551dad53fe8264e8e1eba81f2fab9d337a81d3d0d3aa5413a56b829a0fc",
+      "bytes": 1631
+    },
+    "evidence/install.py": {
+      "sha256": "8a425fb1c9231c82daf282fe92243c778ef276a11549ac353930c79aff9aba1d",
+      "bytes": 5775
+    },
+    "evidence/installation.json": {
+      "sha256": "6b55bb9988e79eff71aec6a7bcb9305c16dc4f04c571f998bb682c96f7f480a3",
+      "bytes": 1334
+    },
+    "nginx-http-limits.conf": {
+      "sha256": "11f693443319c0a9561ab78d9f7e9a27ad4b990ed78011c0764ab3afd7db283d",
+      "bytes": 424
+    },
+    "nginx.conf": {
+      "sha256": "eaef9a090b21b02d32b4a101aed25f72aa95b6e8e391c072ca39636838c244b0",
+      "bytes": 3066
+    }
+  }
+}
